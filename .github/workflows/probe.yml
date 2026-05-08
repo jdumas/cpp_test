@@ -1,0 +1,88 @@
+name: probe
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-11-arm
+            arch: arm64
+            label: win-arm64-dbg
+            config: Debug
+          - os: windows-11-arm
+            arch: arm64
+            label: win-arm64-rel
+            config: Release
+          - os: windows-2025
+            arch: x64
+            label: win-x64
+            config: Debug
+          - os: ubuntu-24.04
+            arch: x64
+            label: linux-x64
+            config: Debug
+          - os: macos-15
+            arch: arm64
+            label: mac-arm64
+            config: Debug
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set arm64 vars (Windows ARM64)
+        if: matrix.os == 'windows-11-arm'
+        shell: pwsh
+        run: |
+          echo "VS_ARCH=arm64" >> $env:GITHUB_ENV
+
+      - name: Set x64 vars (Windows x64)
+        if: matrix.os == 'windows-2025'
+        shell: pwsh
+        run: |
+          echo "VS_ARCH=x64" >> $env:GITHUB_ENV
+
+      - name: Setup MSVC Developer Command Prompt
+        if: startsWith(matrix.os, 'windows')
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ env.VS_ARCH }}
+
+      - name: Configure (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: cmd
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+
+      - name: Configure (Unix)
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} -j
+
+      # Disable Windows debug-runtime assertion popups so the process exits cleanly on failure
+      - name: Disable Windows error popups
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          # CRT debug abort instead of dialog
+          [Environment]::SetEnvironmentVariable("_CRT_DEBUGGER_HOOK", "0", "Process")
+
+      - name: Run probe (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: cmd
+        run: build\probe.exe
+        env:
+          # Suppress message boxes for assertions (so the runner doesn't hang)
+          # Bit 0 = SEM_FAILCRITICALERRORS, Bit 1 = SEM_NOGPFAULTERRORBOX, Bit 2 = SEM_NOOPENFILEERRORBOX
+          # Bit 15 = SEM_NOALIGNMENTFAULTEXCEPT
+          _CRT_ABORT_BEHAVIOR: "0"
+
+      - name: Run probe (Unix)
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        run: ./build/probe
