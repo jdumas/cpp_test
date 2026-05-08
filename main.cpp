@@ -19,8 +19,15 @@
 // alignas-requiring temporaries materialized to bind to function
 // parameters.
 
+#include <cstdint>
 #include <cstdio>
 #include <vector>
+
+// Override eigen_assert to count failures instead of aborting, so the
+// program runs to completion and we can report a single PASS/FAIL line.
+static int g_assert_count = 0;
+#define eigen_assert(x) \
+    do { if (!(x)) ++g_assert_count; } while (0)
 
 #include <Eigen/Core>
 
@@ -39,7 +46,8 @@ using Vec2d = Eigen::Matrix<double, 1, 2>; // alignof == 16, requires 16
 NOINLINE void use(Vec2d p) { (void)p; }
 
 // Caller with a non-trivial stack frame (a few std::vector locals and
-// a loop with a runtime-computed expression).
+// a loop with a runtime-computed expression), mirroring a real-world
+// site where this was observed in production.
 NOINLINE void caller()
 {
     std::vector<double> a(8, 0.0);
@@ -73,5 +81,7 @@ int main()
 
     caller();
 
-    return 0;
+    std::printf("EIGEN_ASSERT count = %d  -- %s\n",
+                g_assert_count, g_assert_count == 0 ? "PASS" : "FAIL");
+    return g_assert_count == 0 ? 0 : 1;
 }
