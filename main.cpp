@@ -79,6 +79,20 @@ int main()
                 alignof(Vec2d),
                 int(Eigen::internal::compute_default_alignment<double, 2>::value));
 
+    // Sanity check: a Vec2d created directly in main() should be 16-byte
+    // aligned by the compiler. If this address is not 16-byte aligned,
+    // even a plain local variable is being misaligned.
+    Vec2d local{1.0, 2.0};
+    const auto local_addr = reinterpret_cast<std::uintptr_t>(&local);
+    std::printf("  &local in main() = 0x%016llx (mod 16 = %llu) -- %s\n",
+                static_cast<unsigned long long>(local_addr),
+                static_cast<unsigned long long>(local_addr % 16),
+                (local_addr % 16 == 0) ? "aligned" : "MISALIGNED");
+
+    // Also pass a brace-init prvalue to use() from main(), to see whether
+    // the temporary-materialization bug reproduces here too.
+    use({1.0, 2.0});
+
     caller();
 
     std::printf("EIGEN_ASSERT count = %d  -- %s\n",
