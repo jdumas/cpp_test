@@ -56,15 +56,21 @@ NOINLINE void sink(M p) { (void)p; }
 // One probe per variant. Each builds a non-trivial stack frame
 // (matching the original caller()'s shape: a couple of std::vector
 // locals + an 8-iter loop) and:
-//   1. Reports alignof(M) and the runtime alignment of a local M.
-//   2. Calls sink<M>({...}) 8 times with a brace-init prvalue,
-//      which is exactly the construct that misbehaves on win-arm64
-//      Debug for HFA-eligible Eigen matrices.
+//   1. Reports alignof(M) and the runtime alignment of a default-
+//      constructed local M, to check whether plain stack locals are
+//      themselves misaligned (independent of any prvalue temporary).
+//   2. Calls sink<M>({...}) 8 times with a brace-init prvalue whose
+//      first element is the runtime-computed value `1.0 - t` (resp.
+//      `int64_t(i)` for the integer variant). The runtime dependency
+//      is what forces MSVC to actually materialize a stack temporary
+//      for the prvalue, rather than folding it into immediate FP
+//      register loads -- and that is exactly the construct that
+//      misbehaves on win-arm64 Debug for HFA-eligible Eigen matrices.
 //   3. Reports the assert delta attributable to this variant.
 #define PROBE(NAME, M, HFA_TAG, ...)                                          \
     NOINLINE static void NAME() {                                             \
         const int before = g_assert_count;                                    \
-        M local{__VA_ARGS__};                                                 \
+        M local;                                                              \
         const auto addr = reinterpret_cast<std::uintptr_t>(&local);           \
         std::vector<double> a(8, 0.0);                                        \
         std::vector<int>    b(8, 0);                                          \
@@ -73,18 +79,18 @@ NOINLINE void sink(M p) { (void)p; }
             sink<M>({__VA_ARGS__});                                           \
         }                                                                     \
         const int delta = g_assert_count - before;                            \
-        std::printf("  %-26s %-7s alignof=%2zu  &local%%16=%2llu  "           \
+        std::printf("  %-26s %-7s alignof=%2zu  &local%%align=%2llu  "        \
                     "asserts=%d  %s\n",                                       \
                     #M, HFA_TAG, alignof(M),                                  \
                     static_cast<unsigned long long>(addr % alignof(M)),       \
                     delta, delta ? "FAIL" : "PASS");                          \
     }
 
-PROBE(probe_d2, M_d2, "HFA",     1.0, 2.0)
-PROBE(probe_d3, M_d3, "HFA",     1.0, 2.0, 3.0)
-PROBE(probe_d4, M_d4, "HFA",     1.0, 2.0, 3.0, 4.0)
-PROBE(probe_d5, M_d5, "non-HFA", 1.0, 2.0, 3.0, 4.0, 5.0)
-PROBE(probe_i2, M_i2, "non-HFA", int64_t(1), int64_t(2))
+PROBE(probe_d2, M_d2, "HFA",     1.0 - t, 0.0)
+PROBE(probe_d3, M_d3, "HFA",     1.0 - t, 0.0, 0.0)
+PROBE(probe_d4, M_d4, "HFA",     1.0 - t, 0.0, 0.0, 0.0)
+PROBE(probe_d5, M_d5, "non-HFA", 1.0 - t, 0.0, 0.0, 0.0, 0.0)
+PROBE(probe_i2, M_i2, "non-HFA", int64_t(i), int64_t(0))
 
 int main()
 {
