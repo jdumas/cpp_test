@@ -49,6 +49,15 @@ struct alignas(16) S16 {
     }
 };
 
+// Opaque sinks the lambda probes forward to. Marking them NOINLINE
+// prevents the lambda bodies (and the run() instantiations) from
+// collapsing to a no-op, which is what masked the codegen defect in
+// earlier iterations of this MWE.
+NOINLINE void sink_vec_by_value(Vec2d        p) { (void)p; }
+NOINLINE void sink_vec_by_ref  (const Vec2d& p) { (void)p; }
+NOINLINE void sink_s16_by_value(S16          p) { (void)p; }
+NOINLINE void sink_s16_by_ref  (const S16&   p) { (void)p; }
+
 // Templated driver: the prvalue temporary is materialized in this
 // frame from a braced-init-list at the fn() call site, then used to
 // initialize fn's parameter object. Two std::vector locals make the
@@ -91,13 +100,13 @@ int main()
     std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
 
     report("Eigen::Matrix<double,1,2>  by value",
-           run([](Vec2d        p) { (void)p; }));
+           run([](Vec2d        p) { sink_vec_by_value(p); }));
     report("Eigen::Matrix<double,1,2>  by const&",
-           run([](const Vec2d& p) { (void)p; }));
+           run([](const Vec2d& p) { sink_vec_by_ref  (p); }));
     report("alignas(16) struct S16     by value",
-           run([](S16          p) { (void)p; }));
+           run([](S16          p) { sink_s16_by_value(p); }));
     report("alignas(16) struct S16     by const&",
-           run([](const S16&   p) { (void)p; }));
+           run([](const S16&   p) { sink_s16_by_ref  (p); }));
 
     std::printf("\nTOTAL misalignments = %d  -- %s\n",
                 g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
