@@ -46,25 +46,28 @@ struct alignas(16) S16 {
     }
 };
 
-// By-value sinks: caller must materialize a temporary for the argument.
-NOINLINE void sink_by_value(Vec2d p) { (void)p; }
-NOINLINE void sink_by_value(S16   p) { (void)p; }
+// By-value sinks: a brace-initialized argument materializes the
+// temporary in the caller's frame to initialize the parameter object.
+NOINLINE void sink_vec_by_value(Vec2d p) { (void)p; }
+NOINLINE void sink_s16_by_value(S16   p) { (void)p; }
 
-// By-const-ref controls: no parameter materialization in the caller.
-NOINLINE void sink_by_ref(const Vec2d& p) { (void)p; }
-NOINLINE void sink_by_ref(const S16&   p) { (void)p; }
+// By-const-ref controls: a const lvalue reference can bind directly
+// to the braced-init-list without forcing a separate materialization.
+NOINLINE void sink_vec_by_ref(const Vec2d& p) { (void)p; }
+NOINLINE void sink_s16_by_ref(const S16&   p) { (void)p; }
 
-// Each driver materializes the brace-initialized prvalue in its own
-// frame. Two std::vector locals make the frame layout non-trivial,
-// so the temporary's stack slot lands at a representative offset
-// rather than a happenstance 16-aligned one.
+// Each driver materializes the prvalue in its own frame, using
+// implicit list-initialization at the call site. Two std::vector
+// locals make the frame layout non-trivial.
 NOINLINE int drive_eigen_by_value()
 {
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
     std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i)
-        sink_by_value(Vec2d{1.0 - double(i) / 8.0, 0.0});
+    for (int i = 0; i < 8; ++i) {
+        const double t = double(i) / 8.0;
+        sink_vec_by_value({1.0 - t, 0.0});
+    }
     return g_misalign_count - before;
 }
 NOINLINE int drive_eigen_by_ref()
@@ -72,8 +75,10 @@ NOINLINE int drive_eigen_by_ref()
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
     std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i)
-        sink_by_ref(Vec2d{1.0 - double(i) / 8.0, 0.0});
+    for (int i = 0; i < 8; ++i) {
+        const double t = double(i) / 8.0;
+        sink_vec_by_ref({1.0 - t, 0.0});
+    }
     return g_misalign_count - before;
 }
 NOINLINE int drive_s16_by_value()
@@ -81,8 +86,10 @@ NOINLINE int drive_s16_by_value()
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
     std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i)
-        sink_by_value(S16{std::uint64_t(i), std::uint64_t(i) + 1});
+    for (int i = 0; i < 8; ++i) {
+        const std::uint64_t u = std::uint64_t(i);
+        sink_s16_by_value({u, u + 1});
+    }
     return g_misalign_count - before;
 }
 NOINLINE int drive_s16_by_ref()
@@ -90,8 +97,10 @@ NOINLINE int drive_s16_by_ref()
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
     std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i)
-        sink_by_ref(S16{std::uint64_t(i), std::uint64_t(i) + 1});
+    for (int i = 0; i < 8; ++i) {
+        const std::uint64_t u = std::uint64_t(i);
+        sink_s16_by_ref({u, u + 1});
+    }
     return g_misalign_count - before;
 }
 
