@@ -1,21 +1,33 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// Variant-test version of the MWE: identify which kinds of callee body
-// trigger Eigen's plain_array<> 16-byte alignment assertion on MSVC for
-// Windows ARM64 in Debug mode, when a brace-initialized Matrix<double,
-// 1, 2> prvalue is passed by value.
+// Minimal reproducer for an MSVC ARM64 Debug codegen defect.
+//
+// A brace-initialized prvalue of a type with extended alignment
+// (alignas(16) or stricter), materialized to pass a by-value function
+// argument, is placed at an address that does not satisfy the type's
+// alignment requirement.
+//
+// Per the C++ standard this is undefined behavior:
+//
+//   [class.temporary]/1 -- "A temporary object is an object created
+//     ... when needed by the implementation to pass or return an
+//     object of suitable type."
+//   [basic.align]/1     -- "Stricter alignment can be requested using
+//     the alignment-specifier ([dcl.align]). Attempting to create an
+//     object in storage that does not meet the alignment requirements
+//     of the object's type is undefined behavior."
+//
+// Both the Eigen and non-Eigen probes below fail on MSVC 14.44.35207
+// (_MSC_VER=1944) targeting ARM64 in Debug; the by-const-ref controls
+// pass. The defect is therefore type-agnostic and not Eigen-specific.
 
 #include <cstdint>
 #include <cstdio>
-#include <vector>
 
-static int g_assert_count = 0;
-#define eigen_assert(x) \
-    do { if (!(x)) ++g_assert_count; } while (0)
+static int g_misalign_count = 0;
+#define eigen_assert(x) do { if (!(x)) ++g_misalign_count; } while (0)
 
 #include <Eigen/Core>
-
-using Vec2d = Eigen::Matrix<double, 1, 2>;
 
 #if defined(_MSC_VER)
 #define NOINLINE __declspec(noinline)
@@ -23,58 +35,39 @@ using Vec2d = Eigen::Matrix<double, 1, 2>;
 #define NOINLINE __attribute__((noinline))
 #endif
 
-// ----- variant callees ------------------------------------------------------
-// V1: discard the parameter (parameter is dead in the function body).
-NOINLINE void use_discard(Vec2d p) { (void)p; }
+using Vec2d = Eigen::Matrix<double, 1, 2>;
 
-// V2: read one component into a volatile sink.
-NOINLINE void use_read_one(Vec2d p)
-{
-    volatile double s = p(0);
-    (void)s;
-}
-
-// V3: read both components.
-NOINLINE void use_read_both(Vec2d p)
-{
-    volatile double s = p(0) + p(1);
-    (void)s;
-}
-
-// V4: take the address of the parameter (no read of data).
-NOINLINE void use_addr(Vec2d p)
-{
-    volatile auto* ptr = &p;
-    (void)ptr;
-}
-
-// V5: forward by-value to another by-value function.
-NOINLINE void use_forward_inner(Vec2d p) { (void)p; }
-NOINLINE void use_forward(Vec2d p) { use_forward_inner(p); }
-
-// V6: pass-by-const-ref control (no by-value parameter at all).
-NOINLINE void use_ref(const Vec2d& p) { (void)p; }
-
-// ----- caller --------------------------------------------------------------
-template <typename F>
-NOINLINE void run_variant(const char* name, F&& fn)
-{
-    const int before = g_assert_count;
-    std::vector<double> a(8, 0.0);
-    std::vector<int>    b(8, 0);
-    for (int i = 0; i < 8; ++i) {
-        const double t = double(i) / 8.0;
-        fn({1.0 - t, 0.0});
+struct alignas(16) S16 {
+    std::uint64_t a, b;
+    S16(std::uint64_t x, std::uint64_t y) : a(x), b(y) {
+        if ((reinterpret_cast<std::uintptr_t>(this) & 0xFu) != 0)
+            ++g_misalign_count;
     }
-    const int delta = g_assert_count - before;
-    std::printf("  %-20s asserts=%d  %s\n",
-                name, delta, delta == 0 ? "PASS" : "FAIL");
+};
+
+// By-value sinks: caller must materialize a temporary for the argument.
+NOINLINE void sink_by_value(Vec2d p) { (void)p; }
+NOINLINE void sink_by_value(S16   p) { (void)p; }
+
+// By-const-ref controls: no parameter materialization in the caller.
+NOINLINE void sink_by_ref(const Vec2d& p) { (void)p; }
+NOINLINE void sink_by_ref(const S16&   p) { (void)p; }
+
+template <class F>
+NOINLINE void run(const char* label, F&& fn)
+{
+    const int before = g_misalign_count;
+    for (int i = 0; i < 8; ++i)
+        fn(i);
+    const int delta = g_misalign_count - before;
+    std::printf("  %-40s misalignments=%d  %s\n",
+                label, delta, delta == 0 ? "PASS" : "FAIL");
     std::fflush(stdout);
 }
 
 int main()
 {
-    std::printf("== Eigen alignment-assert variant probe ==\n");
+    std::printf("== prvalue temporary alignment probe ==\n");
 #if defined(_MSC_VER)
     std::printf("  _MSC_VER = %d\n", _MSC_VER);
 #endif
@@ -85,18 +78,19 @@ int main()
 #endif
     std::printf("  Eigen    = %d.%d.%d\n",
                 EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION);
-    std::printf("  alignof(Matrix<double,1,2>) = %zu (Eigen requires %d)\n\n",
-                alignof(Vec2d),
-                int(Eigen::internal::compute_default_alignment<double, 2>::value));
+    std::printf("  alignof(Eigen::Matrix<double,1,2>) = %zu\n", alignof(Vec2d));
+    std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
 
-    run_variant("use_discard",   [](Vec2d p) { use_discard(p); });
-    run_variant("use_read_one",  [](Vec2d p) { use_read_one(p); });
-    run_variant("use_read_both", [](Vec2d p) { use_read_both(p); });
-    run_variant("use_addr",      [](Vec2d p) { use_addr(p); });
-    run_variant("use_forward",   [](Vec2d p) { use_forward(p); });
-    run_variant("use_ref",       [](const Vec2d& p) { use_ref(p); });
+    run("Eigen::Matrix<double,1,2>  by value",
+        [](int i) { sink_by_value(Vec2d{1.0 - double(i) / 8.0, 0.0}); });
+    run("Eigen::Matrix<double,1,2>  by const&",
+        [](int i) { sink_by_ref  (Vec2d{1.0 - double(i) / 8.0, 0.0}); });
+    run("alignas(16) struct S16     by value",
+        [](int i) { sink_by_value(S16  {std::uint64_t(i), std::uint64_t(i) + 1}); });
+    run("alignas(16) struct S16     by const&",
+        [](int i) { sink_by_ref  (S16  {std::uint64_t(i), std::uint64_t(i) + 1}); });
 
-    std::printf("\nTOTAL EIGEN_ASSERT count = %d  -- %s\n",
-                g_assert_count, g_assert_count == 0 ? "PASS" : "FAIL");
-    return g_assert_count == 0 ? 0 : 1;
+    std::printf("\nTOTAL misalignments = %d  -- %s\n",
+                g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
+    return g_misalign_count == 0 ? 0 : 1;
 }
