@@ -1,41 +1,63 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// Minimal reproducer for an MSVC ARM64 Debug codegen bug:
+// Minimal reproducer for an MSVC ARM64 Debug codegen bug.
 //
-//     When the caller materializes a stack temporary to bind a
-//     brace-initialized prvalue to a function argument, MSVC ARM64
-//     Debug allocates an 8-byte-aligned slot regardless of the
-//     destination type's alignas requirement. Plain stack locals of
-//     the same type are aligned correctly; only the materialized
-//     prvalue temporary is misaligned.
+// Symptom
+// -------
+// When the caller materializes a stack temporary to pass a brace-
+// initialized prvalue as a by-value function argument, MSVC ARM64
+// Debug allocates an 8-byte-aligned slot regardless of the
+// destination type's alignment requirement. Plain stack locals of
+// the same type are aligned correctly; only the materialized prvalue
+// temporary is misaligned. The bug is not Eigen-specific: any type
+// with alignof >= 16 used as a brace-init prvalue argument is
+// affected, as shown below by the two probes (one Eigen, one plain).
 //
-// Reproduces on win-arm64 Debug for any type with alignof >= 16 used
-// as a brace-init prvalue argument -- both an Eigen fixed-size matrix
-// (the original real-world site) and a plain non-Eigen alignas(16)
-// struct. Does not reproduce on win-arm64 Release, win-x64 (Debug or
+// Why this is a defect (C++23 references, draft N4950)
+// ----------------------------------------------------
+//   [class.temporary]/1  "A temporary object is an object created
+//     ... when needed by the implementation to pass or return an
+//     object of suitable type." A materialized prvalue temporary is
+//     therefore an object in the sense of the standard.
+//
+//   [basic.align]/1      "Object types have alignment requirements
+//     ... which place restrictions on the addresses at which an
+//     object of that type may be allocated. ... An object type
+//     imposes an alignment requirement on every object of that type;
+//     stricter alignment can be requested using the alignment-
+//     specifier ([dcl.align]). Attempting to create an object in
+//     storage that does not meet the alignment requirements of the
+//     object's type is undefined behavior."
+//
+// Taken together: the implementation is responsible for honoring the
+// type's alignas requirement when it materializes a temporary for a
+// function argument. MSVC ARM64 Debug does not, which causes every
+// affected call site below to exhibit undefined behavior.
+//
+// Scope
+// -----
+// Reproduces on win-arm64 Debug with MSVC 14.44.35207 (_MSC_VER
+// 1944). Does not reproduce on win-arm64 Release, win-x64 (Debug or
 // Release), linux-x64, or macOS-arm64.
 //
-// Build:
+// Build
+// -----
 //     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 //     cmake --build build
 //     build\probe.exe
 //
-// Expected on every configuration:        "total = 0  -- PASS".
-// Actual on win-arm64 Debug:               every alignof=16 variant
-//                                          (Eigen and non-Eigen alike)
-//                                          reports asserts > 0 and FAILs.
+// Expected on every configuration:    "total asserts = 0  -- PASS".
+// Actual on win-arm64 Debug:           both probes report asserts > 0
+//                                      and the program returns 1.
 
 #include <cstdint>
 #include <cstdio>
-#include <vector>
 
-// Shared misalignment counter, incremented both by Eigen's assertion
-// (overridden below) and by S16::check(). Counting instead of aborting
-// lets the program run to completion and report a single per-variant
-// PASS/FAIL line.
+// Eigen exposes its internal assertion as a configurable macro;
+// override it to count misalignments instead of aborting so the
+// program runs to completion and we get one PASS/FAIL line per probe.
 static int g_assert_count = 0;
-#define eigen_assert(x) \
-    do { if (!(x)) ++g_assert_count; } while (0)
+#define eigen_assert(x) do { if (!(x)) ++g_assert_count; } while (0)
 
 #include <Eigen/Core>
 
@@ -45,76 +67,73 @@ static int g_assert_count = 0;
 #define NOINLINE __attribute__((noinline))
 #endif
 
-// Eigen variants under test. The Eigen fixed-size matrices stamp
-// alignas(16) on their internal plain_array<> when the byte size is
-// a power of two, and assert in the array's constructor that `this`
-// is correctly aligned. That assertion is what fires when a stack
-// temporary is materialized at an under-aligned address.
-using M_d2 = Eigen::Matrix<double,  1, 2>; // alignof = 16
-using M_d3 = Eigen::Matrix<double,  1, 3>; // alignof =  8 (size not pow2)
-using M_d4 = Eigen::Matrix<double,  1, 4>; // alignof = 16
-using M_d5 = Eigen::Matrix<double,  1, 5>; // alignof =  8 (size not pow2)
-using M_i2 = Eigen::Matrix<int64_t, 1, 2>; // alignof = 16
-
-// Non-Eigen control: a plain alignas(16) trivial-ish aggregate with a
-// constructor that checks `this`'s alignment. Demonstrates that the
-// bug is not Eigen-specific -- any 16-byte-aligned type used as a
-// brace-init prvalue argument is affected.
+// --- Non-Eigen probe type ----------------------------------------------
+// Plain alignas(16) aggregate whose constructor checks `this`'s
+// alignment. Demonstrates that the bug is not Eigen-specific.
 struct alignas(16) S16 {
     std::uint64_t a, b;
-    S16() : a(0), b(0) { check(); }
-    S16(std::uint64_t x, std::uint64_t y) : a(x), b(y) { check(); }
-    void check() const {
+    S16(std::uint64_t x, std::uint64_t y) : a(x), b(y) {
         if ((reinterpret_cast<std::uintptr_t>(this) & 15) != 0) {
             ++g_assert_count;
         }
     }
 };
 
-// Sink: takes the value by-value, forcing the caller to materialize a
-// stack temporary for a brace-init prvalue argument.
-template <typename T>
-NOINLINE void sink(T p) { (void)p; }
+// --- Sinks --------------------------------------------------------------
+// Pass by value to force the caller to materialize a stack temporary
+// for the brace-init prvalue argument. NOINLINE keeps the call site
+// honest even if some pass elides it.
+using EigenMat = Eigen::Matrix<double, 1, 2>;  // alignof = 16
 
-// One probe per variant. Each builds a non-trivial stack frame and:
-//   1. Reports alignof(T) and the runtime alignment of a default-
-//      constructed local T, to confirm that plain stack locals are
-//      themselves correctly aligned (independent of the prvalue path).
-//   2. Calls sink<T>({...}) 8 times with a brace-init prvalue whose
-//      first element is a runtime-computed value (`1.0 - t`, or
-//      `i` for integer variants). The runtime dependency is what
-//      forces MSVC to actually materialize a stack temporary for the
-//      prvalue -- pure literal initializers are folded directly into
-//      immediate register loads and silently sidestep the bug.
-//   3. Reports the assert delta attributable to this variant.
-#define PROBE(NAME, T, ...)                                                   \
-    NOINLINE static void NAME() {                                             \
-        const int before = g_assert_count;                                    \
-        T local;                                                              \
-        const auto addr = reinterpret_cast<std::uintptr_t>(&local);           \
-        std::vector<double> a(8, 0.0);                                        \
-        std::vector<int>    b(8, 0);                                          \
-        for (int i = 0; i < 8; ++i) {                                         \
-            const double t = double(i) / 8.0; (void)t; (void)i;               \
-            sink<T>({__VA_ARGS__});                                           \
-        }                                                                     \
-        const int delta = g_assert_count - before;                            \
-        std::printf("  %-26s alignof=%2zu  &local%%align=%2llu  "             \
-                    "asserts=%d  %s\n",                                       \
-                    #T, alignof(T),                                           \
-                    static_cast<unsigned long long>(addr % alignof(T)),       \
-                    delta, delta ? "FAIL" : "PASS");                          \
+NOINLINE static void sink_eigen(EigenMat) {}
+NOINLINE static void sink_s16(S16) {}
+
+// --- Probes -------------------------------------------------------------
+// Each probe:
+//   1. Default-constructs a plain stack local of the type and reports
+//      `&local % alignof(T)`, confirming that locals are aligned
+//      correctly and isolating the defect to the prvalue path.
+//   2. Calls its sink 8 times with a brace-init prvalue whose first
+//      element is a runtime-dependent value. The runtime dependency
+//      forces MSVC to actually materialize a stack temporary -- pure
+//      literal initializers are folded into immediate register loads
+//      and silently sidestep the bug.
+//   3. Reports the per-probe assert delta.
+
+NOINLINE static void probe_eigen() {
+    const int before = g_assert_count;
+    EigenMat local;
+    const auto local_misalign =
+        reinterpret_cast<std::uintptr_t>(&local) % alignof(EigenMat);
+    for (int i = 0; i < 8; ++i) {
+        const double t = double(i) / 8.0;
+        sink_eigen({1.0 - t, 0.0});
     }
+    const int delta = g_assert_count - before;
+    std::printf("  Eigen::Matrix<double,1,2>  alignof=%zu  "
+                "&local%%align=%llu  asserts=%d  %s\n",
+                alignof(EigenMat),
+                static_cast<unsigned long long>(local_misalign),
+                delta, delta ? "FAIL" : "PASS");
+}
 
-PROBE(probe_d2,  M_d2, 1.0 - t, 0.0)
-PROBE(probe_d3,  M_d3, 1.0 - t, 0.0, 0.0)
-PROBE(probe_d4,  M_d4, 1.0 - t, 0.0, 0.0, 0.0)
-PROBE(probe_d5,  M_d5, 1.0 - t, 0.0, 0.0, 0.0, 0.0)
-PROBE(probe_i2,  M_i2, int64_t(i), int64_t(0))
-PROBE(probe_s16, S16,  std::uint64_t(i), std::uint64_t(0))
+NOINLINE static void probe_s16() {
+    const int before = g_assert_count;
+    S16 local{0, 0};
+    const auto local_misalign =
+        reinterpret_cast<std::uintptr_t>(&local) % alignof(S16);
+    for (int i = 0; i < 8; ++i) {
+        sink_s16({std::uint64_t(i), 0});
+    }
+    const int delta = g_assert_count - before;
+    std::printf("  alignas(16) struct S16     alignof=%zu  "
+                "&local%%align=%llu  asserts=%d  %s\n",
+                alignof(S16),
+                static_cast<unsigned long long>(local_misalign),
+                delta, delta ? "FAIL" : "PASS");
+}
 
-int main()
-{
+int main() {
     std::printf("== prvalue-temporary alignment reproducer ==\n");
 #if defined(_MSC_VER)
     std::printf("  _MSC_VER = %d\n", _MSC_VER);
@@ -125,20 +144,10 @@ int main()
     std::printf("  arch     = x86_64\n");
 #endif
     std::printf("  Eigen    = %d.%d.%d\n\n",
-                EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION);
+                EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION,
+                EIGEN_MINOR_VERSION);
 
-    // On win-arm64 Debug, every alignof=16 variant FAILs (Eigen and
-    // non-Eigen alike), while alignof=8 variants PASS -- consistent
-    // with MSVC allocating an 8-byte-aligned slot for the materialized
-    // prvalue temporary regardless of the destination type's alignas
-    // requirement. The &local%align column shows that plain stack
-    // locals are correctly aligned in every case, isolating the bug
-    // to the prvalue-materialization code path.
-    probe_d2();
-    probe_d3();
-    probe_d4();
-    probe_d5();
-    probe_i2();
+    probe_eigen();
     probe_s16();
 
     std::printf("\ntotal asserts = %d  -- %s\n",
