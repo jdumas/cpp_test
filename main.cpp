@@ -46,10 +46,23 @@
 //     cmake --build build
 //     build\probe.exe
 //
-// Expected on every configuration:    "total asserts = 0  -- PASS".
+// Optional bypass mode
+// --------------------
+// Configure with -DBYPASS_EIGEN_UNALIGNED_ASSERT=ON to define
+// EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT, which suppresses Eigen's
+// runtime alignment check. The probe additionally verifies numerical
+// correctness so this mode answers a distinct question: "if a user
+// silences Eigen's assert, does the Eigen path still compute
+// correct results despite the (still-misaligned) temporary?"
+// The non-Eigen S16 probe is unaffected by the macro and continues
+// to report the bug directly.
+//
+// Expected on every configuration:    "total asserts = 0  -- PASS"
+//                                      and value=PASS for probe_eigen.
 // Actual on win-arm64 Debug:           both probes report asserts > 0
 //                                      and the program returns 1.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 
@@ -85,7 +98,16 @@ struct alignas(16) S16 {
 // honest even if some pass elides it.
 using EigenMat = Eigen::Matrix<double, 1, 2>;  // alignof = 16
 
-NOINLINE static void sink_eigen(EigenMat) {}
+// Running sum of the elements observed inside sink_eigen. Lets the
+// Eigen probe verify numerical correctness, which is the relevant
+// signal when EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT is defined (the
+// alignment check becomes a no-op, so misalignment can no longer be
+// observed via g_assert_count -- only via wrong results, a crash, or
+// the S16 probe).
+static double g_eigen_sum = 0.0;
+static int g_value_failures = 0;
+
+NOINLINE static void sink_eigen(EigenMat p) { g_eigen_sum += p(0, 0) + p(0, 1); }
 NOINLINE static void sink_s16(S16) {}
 
 // --- Probes -------------------------------------------------------------
@@ -98,23 +120,30 @@ NOINLINE static void sink_s16(S16) {}
 //      forces MSVC to actually materialize a stack temporary -- pure
 //      literal initializers are folded into immediate register loads
 //      and silently sidestep the bug.
-//   3. Reports the per-probe assert delta.
+//   3. Reports the per-probe assert delta (and, for the Eigen probe,
+//      a numerical correctness check against the expected sum).
 
 NOINLINE static void probe_eigen() {
     const int before = g_assert_count;
     EigenMat local;
     const auto local_misalign =
         reinterpret_cast<std::uintptr_t>(&local) % alignof(EigenMat);
+    double expected = 0.0;
+    g_eigen_sum = 0.0;
     for (int i = 0; i < 8; ++i) {
         const double t = double(i) / 8.0;
+        expected += (1.0 - t) + 0.0;
         sink_eigen({1.0 - t, 0.0});
     }
     const int delta = g_assert_count - before;
+    const bool value_ok = std::fabs(g_eigen_sum - expected) < 1e-12;
+    if (!value_ok) ++g_value_failures;
+    const bool ok = (delta == 0) && value_ok;
     std::printf("  Eigen::Matrix<double,1,2>  alignof=%zu  "
-                "&local%%align=%llu  asserts=%d  %s\n",
+                "&local%%align=%llu  asserts=%d  value=%s  %s\n",
                 alignof(EigenMat),
                 static_cast<unsigned long long>(local_misalign),
-                delta, delta ? "FAIL" : "PASS");
+                delta, value_ok ? "PASS" : "FAIL", ok ? "PASS" : "FAIL");
 }
 
 NOINLINE static void probe_s16() {
@@ -127,7 +156,7 @@ NOINLINE static void probe_s16() {
     }
     const int delta = g_assert_count - before;
     std::printf("  alignas(16) struct S16     alignof=%zu  "
-                "&local%%align=%llu  asserts=%d  %s\n",
+                "&local%%align=%llu  asserts=%d  value=n/a   %s\n",
                 alignof(S16),
                 static_cast<unsigned long long>(local_misalign),
                 delta, delta ? "FAIL" : "PASS");
@@ -143,14 +172,20 @@ int main() {
 #elif defined(_M_X64) || defined(__x86_64__)
     std::printf("  arch     = x86_64\n");
 #endif
-    std::printf("  Eigen    = %d.%d.%d\n\n",
+    std::printf("  Eigen    = %d.%d.%d\n",
                 EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION,
                 EIGEN_MINOR_VERSION);
+#if defined(EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT)
+    std::printf("  bypass   = EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT defined\n");
+#endif
+    std::printf("\n");
 
     probe_eigen();
     probe_s16();
 
-    std::printf("\ntotal asserts = %d  -- %s\n",
-                g_assert_count, g_assert_count == 0 ? "PASS" : "FAIL");
-    return g_assert_count == 0 ? 0 : 1;
+    const int failures = g_assert_count + g_value_failures;
+    std::printf("\ntotal asserts = %d  value-failures = %d  -- %s\n",
+                g_assert_count, g_value_failures,
+                failures == 0 ? "PASS" : "FAIL");
+    return failures == 0 ? 0 : 1;
 }

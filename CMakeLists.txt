@@ -11,6 +11,9 @@ if(MSVC)
 endif()
 
 option(WITH_EIGEN "Pull Eigen 5.0.1 and include it in the probe" ON)
+option(BYPASS_EIGEN_UNALIGNED_ASSERT
+       "Define EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT to suppress Eigen's runtime alignment check"
+       OFF)
 
 include(FetchContent)
 if(WITH_EIGEN)
@@ -28,4 +31,7 @@ endif()
 add_executable(probe main.cpp)
 if(WITH_EIGEN AND eigen_SOURCE_DIR)
     target_include_directories(probe SYSTEM PRIVATE ${eigen_SOURCE_DIR})
+endif()
+if(BYPASS_EIGEN_UNALIGNED_ASSERT)
+    target_compile_definitions(probe PRIVATE EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT)
 endif()

@@ -14,22 +14,32 @@ jobs:
             arch: arm64
             label: win-arm64-dbg
             config: Debug
+            cmake_extra: ''
+          - os: windows-11-arm
+            arch: arm64
+            label: win-arm64-dbg-bypass
+            config: Debug
+            cmake_extra: '-DBYPASS_EIGEN_UNALIGNED_ASSERT=ON'
           - os: windows-11-arm
             arch: arm64
             label: win-arm64-rel
             config: Release
+            cmake_extra: ''
           - os: windows-2025
             arch: x64
             label: win-x64
             config: Debug
+            cmake_extra: ''
           - os: ubuntu-24.04
             arch: x64
             label: linux-x64
             config: Debug
+            cmake_extra: ''
           - os: macos-15
             arch: arm64
             label: mac-arm64
             config: Debug
+            cmake_extra: ''
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.label }}
     steps:
@@ -56,11 +66,11 @@ jobs:
       - name: Configure (Windows)
         if: startsWith(matrix.os, 'windows')
         shell: cmd
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }} ${{ matrix.cmake_extra }}
 
       - name: Configure (Unix)
         if: ${{ !startsWith(matrix.os, 'windows') }}
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=${{ matrix.config }} ${{ matrix.cmake_extra }}
 
       - name: Build
         run: cmake --build build --config ${{ matrix.config }} -j
