@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
 static int g_misalign_count = 0;
 #define eigen_assert(x) do { if (!(x)) ++g_misalign_count; } while (0)
@@ -53,15 +54,51 @@ NOINLINE void sink_by_value(S16   p) { (void)p; }
 NOINLINE void sink_by_ref(const Vec2d& p) { (void)p; }
 NOINLINE void sink_by_ref(const S16&   p) { (void)p; }
 
-template <class F>
-NOINLINE void run(const char* label, F&& fn)
+// Each driver materializes the brace-initialized prvalue in its own
+// frame. Two std::vector locals make the frame layout non-trivial,
+// so the temporary's stack slot lands at a representative offset
+// rather than a happenstance 16-aligned one.
+NOINLINE int drive_eigen_by_value()
 {
     const int before = g_misalign_count;
+    std::vector<double> pad_a(8, 0.0);
+    std::vector<int>    pad_b(8, 0);
     for (int i = 0; i < 8; ++i)
-        fn(i);
-    const int delta = g_misalign_count - before;
+        sink_by_value(Vec2d{1.0 - double(i) / 8.0, 0.0});
+    return g_misalign_count - before;
+}
+NOINLINE int drive_eigen_by_ref()
+{
+    const int before = g_misalign_count;
+    std::vector<double> pad_a(8, 0.0);
+    std::vector<int>    pad_b(8, 0);
+    for (int i = 0; i < 8; ++i)
+        sink_by_ref(Vec2d{1.0 - double(i) / 8.0, 0.0});
+    return g_misalign_count - before;
+}
+NOINLINE int drive_s16_by_value()
+{
+    const int before = g_misalign_count;
+    std::vector<double> pad_a(8, 0.0);
+    std::vector<int>    pad_b(8, 0);
+    for (int i = 0; i < 8; ++i)
+        sink_by_value(S16{std::uint64_t(i), std::uint64_t(i) + 1});
+    return g_misalign_count - before;
+}
+NOINLINE int drive_s16_by_ref()
+{
+    const int before = g_misalign_count;
+    std::vector<double> pad_a(8, 0.0);
+    std::vector<int>    pad_b(8, 0);
+    for (int i = 0; i < 8; ++i)
+        sink_by_ref(S16{std::uint64_t(i), std::uint64_t(i) + 1});
+    return g_misalign_count - before;
+}
+
+static void report(const char* label, int n)
+{
     std::printf("  %-40s misalignments=%d  %s\n",
-                label, delta, delta == 0 ? "PASS" : "FAIL");
+                label, n, n == 0 ? "PASS" : "FAIL");
     std::fflush(stdout);
 }
 
@@ -81,14 +118,10 @@ int main()
     std::printf("  alignof(Eigen::Matrix<double,1,2>) = %zu\n", alignof(Vec2d));
     std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
 
-    run("Eigen::Matrix<double,1,2>  by value",
-        [](int i) { sink_by_value(Vec2d{1.0 - double(i) / 8.0, 0.0}); });
-    run("Eigen::Matrix<double,1,2>  by const&",
-        [](int i) { sink_by_ref  (Vec2d{1.0 - double(i) / 8.0, 0.0}); });
-    run("alignas(16) struct S16     by value",
-        [](int i) { sink_by_value(S16  {std::uint64_t(i), std::uint64_t(i) + 1}); });
-    run("alignas(16) struct S16     by const&",
-        [](int i) { sink_by_ref  (S16  {std::uint64_t(i), std::uint64_t(i) + 1}); });
+    report("Eigen::Matrix<double,1,2>  by value",  drive_eigen_by_value());
+    report("Eigen::Matrix<double,1,2>  by const&", drive_eigen_by_ref());
+    report("alignas(16) struct S16     by value",  drive_s16_by_value());
+    report("alignas(16) struct S16     by const&", drive_s16_by_ref());
 
     std::printf("\nTOTAL misalignments = %d  -- %s\n",
                 g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
