@@ -11,7 +11,15 @@
 // the same type are aligned correctly; only the materialized prvalue
 // temporary is misaligned. The bug is not Eigen-specific: any type
 // with alignof >= 16 used as a brace-init prvalue argument is
-// affected, as shown below by the two probes (one Eigen, one plain).
+// affected.
+//
+// Additional trigger condition: the bug fires only when the callee
+// discards the by-value parameter. If the callee actually reads the
+// parameter, MSVC's argument-passing codegen routes the value
+// differently and the materialized temporary ends up correctly
+// aligned. The two Eigen probes below demonstrate both cases; the
+// S16 probe uses the discarding shape to demonstrate the underlying
+// MSVC bug independently of Eigen.
 //
 // Why this is a defect (C++23 references, draft N4950)
 // ----------------------------------------------------
@@ -50,17 +58,17 @@
 // --------------------
 // Configure with -DBYPASS_EIGEN_UNALIGNED_ASSERT=ON to define
 // EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT, which suppresses Eigen's
-// runtime alignment check. The probe additionally verifies numerical
+// runtime alignment check. The consume probe verifies numerical
 // correctness so this mode answers a distinct question: "if a user
 // silences Eigen's assert, does the Eigen path still compute
-// correct results despite the (still-misaligned) temporary?"
-// The non-Eigen S16 probe is unaffected by the macro and continues
-// to report the bug directly.
+// correct results?" The S16 probe is unaffected by the macro and
+// continues to report the underlying MSVC bug directly, so even in
+// bypass mode win-arm64 Debug still FAILs overall.
 //
-// Expected on every configuration:    "total asserts = 0  -- PASS"
-//                                      and value=PASS for probe_eigen.
-// Actual on win-arm64 Debug:           both probes report asserts > 0
-//                                      and the program returns 1.
+// Expected on every non-broken configuration: total asserts = 0,
+// value-failures = 0, exit code 0. Actual on win-arm64 Debug:
+// probe_eigen_discard and probe_s16 each report asserts > 0 and the
+// program returns 1.
 
 #include <cmath>
 #include <cstdint>
@@ -96,18 +104,27 @@ struct alignas(16) S16 {
 // Pass by value to force the caller to materialize a stack temporary
 // for the brace-init prvalue argument. NOINLINE keeps the call site
 // honest even if some pass elides it.
+//
+// Two Eigen sinks are provided to expose an additional trigger
+// condition discovered while building this reproducer:
+//   - sink_eigen_discard ignores the parameter; this is the variant
+//     that triggers the bug (MSVC ARM64 Debug misaligns the caller's
+//     materialized temporary).
+//   - sink_eigen_consume reads the parameter and accumulates into a
+//     global; in that case MSVC's argument-passing codegen routes the
+//     value differently and the bug does NOT fire. This is the
+//     real-world shape of Eigen usage and is the path whose numerical
+//     correctness is checked when running with
+//     EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT.
 using EigenMat = Eigen::Matrix<double, 1, 2>;  // alignof = 16
 
-// Running sum of the elements observed inside sink_eigen. Lets the
-// Eigen probe verify numerical correctness, which is the relevant
-// signal when EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT is defined (the
-// alignment check becomes a no-op, so misalignment can no longer be
-// observed via g_assert_count -- only via wrong results, a crash, or
-// the S16 probe).
 static double g_eigen_sum = 0.0;
 static int g_value_failures = 0;
 
-NOINLINE static void sink_eigen(EigenMat p) { g_eigen_sum += p(0, 0) + p(0, 1); }
+NOINLINE static void sink_eigen_discard(EigenMat) {}
+NOINLINE static void sink_eigen_consume(EigenMat p) {
+    g_eigen_sum += p(0, 0) + p(0, 1);
+}
 NOINLINE static void sink_s16(S16) {}
 
 // --- Probes -------------------------------------------------------------
@@ -120,10 +137,27 @@ NOINLINE static void sink_s16(S16) {}
 //      forces MSVC to actually materialize a stack temporary -- pure
 //      literal initializers are folded into immediate register loads
 //      and silently sidestep the bug.
-//   3. Reports the per-probe assert delta (and, for the Eigen probe,
+//   3. Reports the per-probe assert delta (and, for the consume probe,
 //      a numerical correctness check against the expected sum).
 
-NOINLINE static void probe_eigen() {
+NOINLINE static void probe_eigen_discard() {
+    const int before = g_assert_count;
+    EigenMat local;
+    const auto local_misalign =
+        reinterpret_cast<std::uintptr_t>(&local) % alignof(EigenMat);
+    for (int i = 0; i < 8; ++i) {
+        const double t = double(i) / 8.0;
+        sink_eigen_discard({1.0 - t, 0.0});
+    }
+    const int delta = g_assert_count - before;
+    std::printf("  Eigen<double,1,2> discard   alignof=%zu  "
+                "&local%%align=%llu  asserts=%d  value=n/a   %s\n",
+                alignof(EigenMat),
+                static_cast<unsigned long long>(local_misalign),
+                delta, delta ? "FAIL" : "PASS");
+}
+
+NOINLINE static void probe_eigen_consume() {
     const int before = g_assert_count;
     EigenMat local;
     const auto local_misalign =
@@ -133,13 +167,13 @@ NOINLINE static void probe_eigen() {
     for (int i = 0; i < 8; ++i) {
         const double t = double(i) / 8.0;
         expected += (1.0 - t) + 0.0;
-        sink_eigen({1.0 - t, 0.0});
+        sink_eigen_consume({1.0 - t, 0.0});
     }
     const int delta = g_assert_count - before;
     const bool value_ok = std::fabs(g_eigen_sum - expected) < 1e-12;
     if (!value_ok) ++g_value_failures;
     const bool ok = (delta == 0) && value_ok;
-    std::printf("  Eigen::Matrix<double,1,2>  alignof=%zu  "
+    std::printf("  Eigen<double,1,2> consume   alignof=%zu  "
                 "&local%%align=%llu  asserts=%d  value=%s  %s\n",
                 alignof(EigenMat),
                 static_cast<unsigned long long>(local_misalign),
@@ -155,7 +189,7 @@ NOINLINE static void probe_s16() {
         sink_s16({std::uint64_t(i), 0});
     }
     const int delta = g_assert_count - before;
-    std::printf("  alignas(16) struct S16     alignof=%zu  "
+    std::printf("  alignas(16) struct S16      alignof=%zu  "
                 "&local%%align=%llu  asserts=%d  value=n/a   %s\n",
                 alignof(S16),
                 static_cast<unsigned long long>(local_misalign),
@@ -180,7 +214,8 @@ int main() {
 #endif
     std::printf("\n");
 
-    probe_eigen();
+    probe_eigen_discard();
+    probe_eigen_consume();
     probe_s16();
 
     const int failures = g_assert_count + g_value_failures;
