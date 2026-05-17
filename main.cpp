@@ -64,7 +64,7 @@ NOINLINE void sink_s16_by_ref  (const S16&   p) { (void)p; }
 // frame layout non-trivial so the temporary's stack slot lands at a
 // representative offset rather than a happenstance 16-aligned one.
 template <class F>
-NOINLINE int run(F&& fn)
+NOINLINE void run(const char* label, F&& fn)
 {
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
@@ -73,13 +73,9 @@ NOINLINE int run(F&& fn)
         const double t = double(i) / 8.0;
         fn({1.0 - t, 0.0});
     }
-    return g_misalign_count - before;
-}
-
-static void report(const char* label, int n)
-{
+    const int delta = g_misalign_count - before;
     std::printf("  %-40s misalignments=%d  %s\n",
-                label, n, n == 0 ? "PASS" : "FAIL");
+                label, delta, delta == 0 ? "PASS" : "FAIL");
     std::fflush(stdout);
 }
 
@@ -99,14 +95,14 @@ int main()
     std::printf("  alignof(Eigen::Matrix<double,1,2>) = %zu\n", alignof(Vec2d));
     std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
 
-    report("Eigen::Matrix<double,1,2>  by value",
-           run([](Vec2d        p) { sink_vec_by_value(p); }));
-    report("Eigen::Matrix<double,1,2>  by const&",
-           run([](const Vec2d& p) { sink_vec_by_ref  (p); }));
-    report("alignas(16) struct S16     by value",
-           run([](S16          p) { sink_s16_by_value(p); }));
-    report("alignas(16) struct S16     by const&",
-           run([](const S16&   p) { sink_s16_by_ref  (p); }));
+    run("Eigen::Matrix<double,1,2>  by value",
+        [](Vec2d        p) { sink_vec_by_value(p); });
+    run("Eigen::Matrix<double,1,2>  by const&",
+        [](const Vec2d& p) { sink_vec_by_ref  (p); });
+    run("alignas(16) struct S16     by value",
+        [](S16          p) { sink_s16_by_value(p); });
+    run("alignas(16) struct S16     by const&",
+        [](const S16&   p) { sink_s16_by_ref  (p); });
 
     std::printf("\nTOTAL misalignments = %d  -- %s\n",
                 g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
