@@ -38,68 +38,31 @@ static int g_misalign_count = 0;
 
 using Vec2d = Eigen::Matrix<double, 1, 2>;
 
+// Non-Eigen counterpart: a plain struct with the same storage shape
+// (two doubles) and the same extended alignment as Vec2d, so the
+// same braced-init-list initializes either type via the lambda
+// parameter below.
 struct alignas(16) S16 {
-    std::uint64_t a, b;
-    S16(std::uint64_t x, std::uint64_t y) : a(x), b(y) {
-        if ((reinterpret_cast<std::uintptr_t>(this) & 0xFu) != 0)
-            ++g_misalign_count;
+    double a, b;
+    S16(double x, double y) : a(x), b(y) {
+        eigen_assert((reinterpret_cast<std::uintptr_t>(this) & 0xFu) == 0);
     }
 };
 
-// By-value sinks: a brace-initialized argument materializes the
-// temporary in the caller's frame to initialize the parameter object.
-NOINLINE void sink_vec_by_value(Vec2d p) { (void)p; }
-NOINLINE void sink_s16_by_value(S16   p) { (void)p; }
-
-// By-const-ref controls: a const lvalue reference can bind directly
-// to the braced-init-list without forcing a separate materialization.
-NOINLINE void sink_vec_by_ref(const Vec2d& p) { (void)p; }
-NOINLINE void sink_s16_by_ref(const S16&   p) { (void)p; }
-
-// Each driver materializes the prvalue in its own frame, using
-// implicit list-initialization at the call site. Two std::vector
-// locals make the frame layout non-trivial.
-NOINLINE int drive_eigen_by_value()
+// Templated driver: the prvalue temporary is materialized in this
+// frame from a braced-init-list at the fn() call site, then used to
+// initialize fn's parameter object. Two std::vector locals make the
+// frame layout non-trivial so the temporary's stack slot lands at a
+// representative offset rather than a happenstance 16-aligned one.
+template <class F>
+NOINLINE int run(F&& fn)
 {
     const int before = g_misalign_count;
     std::vector<double> pad_a(8, 0.0);
     std::vector<int>    pad_b(8, 0);
     for (int i = 0; i < 8; ++i) {
         const double t = double(i) / 8.0;
-        sink_vec_by_value({1.0 - t, 0.0});
-    }
-    return g_misalign_count - before;
-}
-NOINLINE int drive_eigen_by_ref()
-{
-    const int before = g_misalign_count;
-    std::vector<double> pad_a(8, 0.0);
-    std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i) {
-        const double t = double(i) / 8.0;
-        sink_vec_by_ref({1.0 - t, 0.0});
-    }
-    return g_misalign_count - before;
-}
-NOINLINE int drive_s16_by_value()
-{
-    const int before = g_misalign_count;
-    std::vector<double> pad_a(8, 0.0);
-    std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i) {
-        const std::uint64_t u = std::uint64_t(i);
-        sink_s16_by_value({u, u + 1});
-    }
-    return g_misalign_count - before;
-}
-NOINLINE int drive_s16_by_ref()
-{
-    const int before = g_misalign_count;
-    std::vector<double> pad_a(8, 0.0);
-    std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i) {
-        const std::uint64_t u = std::uint64_t(i);
-        sink_s16_by_ref({u, u + 1});
+        fn({1.0 - t, 0.0});
     }
     return g_misalign_count - before;
 }
@@ -127,10 +90,14 @@ int main()
     std::printf("  alignof(Eigen::Matrix<double,1,2>) = %zu\n", alignof(Vec2d));
     std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
 
-    report("Eigen::Matrix<double,1,2>  by value",  drive_eigen_by_value());
-    report("Eigen::Matrix<double,1,2>  by const&", drive_eigen_by_ref());
-    report("alignas(16) struct S16     by value",  drive_s16_by_value());
-    report("alignas(16) struct S16     by const&", drive_s16_by_ref());
+    report("Eigen::Matrix<double,1,2>  by value",
+           run([](Vec2d        p) { (void)p; }));
+    report("Eigen::Matrix<double,1,2>  by const&",
+           run([](const Vec2d& p) { (void)p; }));
+    report("alignas(16) struct S16     by value",
+           run([](S16          p) { (void)p; }));
+    report("alignas(16) struct S16     by const&",
+           run([](const S16&   p) { (void)p; }));
 
     std::printf("\nTOTAL misalignments = %d  -- %s\n",
                 g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
