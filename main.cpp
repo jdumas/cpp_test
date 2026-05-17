@@ -1,86 +1,21 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// Minimal reproducer for an MSVC ARM64 Debug codegen bug.
-//
-// Symptom
-// -------
-// When the caller materializes a stack temporary to pass a brace-
-// initialized prvalue as a by-value function argument, MSVC ARM64
-// Debug allocates an 8-byte-aligned slot regardless of the
-// destination type's alignment requirement. Plain stack locals of
-// the same type are aligned correctly; only the materialized prvalue
-// temporary is misaligned. The bug is not Eigen-specific: any type
-// with alignof >= 16 used as a brace-init prvalue argument is
-// affected.
-//
-// Additional trigger condition: the bug fires only when the callee
-// discards the by-value parameter. If the callee actually reads the
-// parameter, MSVC's argument-passing codegen routes the value
-// differently and the materialized temporary ends up correctly
-// aligned. The two Eigen probes below demonstrate both cases; the
-// S16 probe uses the discarding shape to demonstrate the underlying
-// MSVC bug independently of Eigen.
-//
-// Why this is a defect (C++23 references, draft N4950)
-// ----------------------------------------------------
-//   [class.temporary]/1  "A temporary object is an object created
-//     ... when needed by the implementation to pass or return an
-//     object of suitable type." A materialized prvalue temporary is
-//     therefore an object in the sense of the standard.
-//
-//   [basic.align]/1      "Object types have alignment requirements
-//     ... which place restrictions on the addresses at which an
-//     object of that type may be allocated. ... An object type
-//     imposes an alignment requirement on every object of that type;
-//     stricter alignment can be requested using the alignment-
-//     specifier ([dcl.align]). Attempting to create an object in
-//     storage that does not meet the alignment requirements of the
-//     object's type is undefined behavior."
-//
-// Taken together: the implementation is responsible for honoring the
-// type's alignas requirement when it materializes a temporary for a
-// function argument. MSVC ARM64 Debug does not, which causes every
-// affected call site below to exhibit undefined behavior.
-//
-// Scope
-// -----
-// Reproduces on win-arm64 Debug with MSVC 14.44.35207 (_MSC_VER
-// 1944). Does not reproduce on win-arm64 Release, win-x64 (Debug or
-// Release), linux-x64, or macOS-arm64.
-//
-// Build
-// -----
-//     cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-//     cmake --build build
-//     build\probe.exe
-//
-// Optional bypass mode
-// --------------------
-// Configure with -DBYPASS_EIGEN_UNALIGNED_ASSERT=ON to define
-// EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT, which suppresses Eigen's
-// runtime alignment check. The consume probe verifies numerical
-// correctness so this mode answers a distinct question: "if a user
-// silences Eigen's assert, does the Eigen path still compute
-// correct results?" The S16 probe is unaffected by the macro and
-// continues to report the underlying MSVC bug directly, so even in
-// bypass mode win-arm64 Debug still FAILs overall.
-//
-// Expected on every non-broken configuration: total asserts = 0,
-// value-failures = 0, exit code 0. Actual on win-arm64 Debug:
-// probe_eigen_discard and probe_s16 each report asserts > 0 and the
-// program returns 1.
+// Variant-test version of the MWE: identify which kinds of callee body
+// trigger Eigen's plain_array<> 16-byte alignment assertion on MSVC for
+// Windows ARM64 in Debug mode, when a brace-initialized Matrix<double,
+// 1, 2> prvalue is passed by value.
 
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
 
-// Eigen exposes its internal assertion as a configurable macro;
-// override it to count misalignments instead of aborting so the
-// program runs to completion and we get one PASS/FAIL line per probe.
 static int g_assert_count = 0;
-#define eigen_assert(x) do { if (!(x)) ++g_assert_count; } while (0)
+#define eigen_assert(x) \
+    do { if (!(x)) ++g_assert_count; } while (0)
 
 #include <Eigen/Core>
+
+using Vec2d = Eigen::Matrix<double, 1, 2>;
 
 #if defined(_MSC_VER)
 #define NOINLINE __declspec(noinline)
@@ -88,116 +23,58 @@ static int g_assert_count = 0;
 #define NOINLINE __attribute__((noinline))
 #endif
 
-// --- Non-Eigen probe type ----------------------------------------------
-// Plain alignas(16) aggregate whose constructor checks `this`'s
-// alignment. Demonstrates that the bug is not Eigen-specific.
-struct alignas(16) S16 {
-    std::uint64_t a, b;
-    S16(std::uint64_t x, std::uint64_t y) : a(x), b(y) {
-        if ((reinterpret_cast<std::uintptr_t>(this) & 15) != 0) {
-            ++g_assert_count;
-        }
-    }
-};
+// ----- variant callees ------------------------------------------------------
+// V1: discard the parameter (parameter is dead in the function body).
+NOINLINE void use_discard(Vec2d p) { (void)p; }
 
-// --- Sinks --------------------------------------------------------------
-// Pass by value to force the caller to materialize a stack temporary
-// for the brace-init prvalue argument. NOINLINE keeps the call site
-// honest even if some pass elides it.
-//
-// Two Eigen sinks are provided to expose an additional trigger
-// condition discovered while building this reproducer:
-//   - sink_eigen_discard ignores the parameter; this is the variant
-//     that triggers the bug (MSVC ARM64 Debug misaligns the caller's
-//     materialized temporary).
-//   - sink_eigen_consume reads the parameter and accumulates into a
-//     global; in that case MSVC's argument-passing codegen routes the
-//     value differently and the bug does NOT fire. This is the
-//     real-world shape of Eigen usage and is the path whose numerical
-//     correctness is checked when running with
-//     EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT.
-using EigenMat = Eigen::Matrix<double, 1, 2>;  // alignof = 16
-
-static double g_eigen_sum = 0.0;
-static int g_value_failures = 0;
-
-NOINLINE static void sink_eigen_discard(EigenMat) {}
-NOINLINE static void sink_eigen_consume(EigenMat p) {
-    g_eigen_sum += p(0, 0) + p(0, 1);
+// V2: read one component into a volatile sink.
+NOINLINE void use_read_one(Vec2d p)
+{
+    volatile double s = p(0);
+    (void)s;
 }
-NOINLINE static void sink_s16(S16) {}
 
-// --- Probes -------------------------------------------------------------
-// Each probe:
-//   1. Default-constructs a plain stack local of the type and reports
-//      `&local % alignof(T)`, confirming that locals are aligned
-//      correctly and isolating the defect to the prvalue path.
-//   2. Calls its sink 8 times with a brace-init prvalue whose first
-//      element is a runtime-dependent value. The runtime dependency
-//      forces MSVC to actually materialize a stack temporary -- pure
-//      literal initializers are folded into immediate register loads
-//      and silently sidestep the bug.
-//   3. Reports the per-probe assert delta (and, for the consume probe,
-//      a numerical correctness check against the expected sum).
+// V3: read both components.
+NOINLINE void use_read_both(Vec2d p)
+{
+    volatile double s = p(0) + p(1);
+    (void)s;
+}
 
-NOINLINE static void probe_eigen_discard() {
+// V4: take the address of the parameter (no read of data).
+NOINLINE void use_addr(Vec2d p)
+{
+    volatile auto* ptr = &p;
+    (void)ptr;
+}
+
+// V5: forward by-value to another by-value function.
+NOINLINE void use_forward_inner(Vec2d p) { (void)p; }
+NOINLINE void use_forward(Vec2d p) { use_forward_inner(p); }
+
+// V6: pass-by-const-ref control (no by-value parameter at all).
+NOINLINE void use_ref(const Vec2d& p) { (void)p; }
+
+// ----- caller --------------------------------------------------------------
+template <typename F>
+NOINLINE void run_variant(const char* name, F&& fn)
+{
     const int before = g_assert_count;
-    EigenMat local;
-    const auto local_misalign =
-        reinterpret_cast<std::uintptr_t>(&local) % alignof(EigenMat);
+    std::vector<double> a(8, 0.0);
+    std::vector<int>    b(8, 0);
     for (int i = 0; i < 8; ++i) {
         const double t = double(i) / 8.0;
-        sink_eigen_discard({1.0 - t, 0.0});
+        fn({1.0 - t, 0.0});
     }
     const int delta = g_assert_count - before;
-    std::printf("  Eigen<double,1,2> discard   alignof=%zu  "
-                "&local%%align=%llu  asserts=%d  value=n/a   %s\n",
-                alignof(EigenMat),
-                static_cast<unsigned long long>(local_misalign),
-                delta, delta ? "FAIL" : "PASS");
+    std::printf("  %-20s asserts=%d  %s\n",
+                name, delta, delta == 0 ? "PASS" : "FAIL");
+    std::fflush(stdout);
 }
 
-NOINLINE static void probe_eigen_consume() {
-    const int before = g_assert_count;
-    EigenMat local;
-    const auto local_misalign =
-        reinterpret_cast<std::uintptr_t>(&local) % alignof(EigenMat);
-    double expected = 0.0;
-    g_eigen_sum = 0.0;
-    for (int i = 0; i < 8; ++i) {
-        const double t = double(i) / 8.0;
-        expected += (1.0 - t) + 0.0;
-        sink_eigen_consume({1.0 - t, 0.0});
-    }
-    const int delta = g_assert_count - before;
-    const bool value_ok = std::fabs(g_eigen_sum - expected) < 1e-12;
-    if (!value_ok) ++g_value_failures;
-    const bool ok = (delta == 0) && value_ok;
-    std::printf("  Eigen<double,1,2> consume   alignof=%zu  "
-                "&local%%align=%llu  asserts=%d  value=%s  %s\n",
-                alignof(EigenMat),
-                static_cast<unsigned long long>(local_misalign),
-                delta, value_ok ? "PASS" : "FAIL", ok ? "PASS" : "FAIL");
-}
-
-NOINLINE static void probe_s16() {
-    const int before = g_assert_count;
-    S16 local{0, 0};
-    const auto local_misalign =
-        reinterpret_cast<std::uintptr_t>(&local) % alignof(S16);
-    for (int i = 0; i < 8; ++i) {
-        sink_s16({std::uint64_t(i), 0});
-    }
-    const int delta = g_assert_count - before;
-    std::printf("  alignas(16) struct S16      alignof=%zu  "
-                "&local%%align=%llu  asserts=%d  value=n/a   %s\n",
-                alignof(S16),
-                static_cast<unsigned long long>(local_misalign),
-                delta, delta ? "FAIL" : "PASS");
-}
-
-int main() {
-    std::printf("== prvalue-temporary alignment reproducer ==\n");
+int main()
+{
+    std::printf("== Eigen alignment-assert variant probe ==\n");
 #if defined(_MSC_VER)
     std::printf("  _MSC_VER = %d\n", _MSC_VER);
 #endif
@@ -207,20 +84,19 @@ int main() {
     std::printf("  arch     = x86_64\n");
 #endif
     std::printf("  Eigen    = %d.%d.%d\n",
-                EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION,
-                EIGEN_MINOR_VERSION);
-#if defined(EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT)
-    std::printf("  bypass   = EIGEN_DISABLE_UNALIGNED_ARRAY_ASSERT defined\n");
-#endif
-    std::printf("\n");
+                EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION);
+    std::printf("  alignof(Matrix<double,1,2>) = %zu (Eigen requires %d)\n\n",
+                alignof(Vec2d),
+                int(Eigen::internal::compute_default_alignment<double, 2>::value));
 
-    probe_eigen_discard();
-    probe_eigen_consume();
-    probe_s16();
+    run_variant("use_discard",   [](Vec2d p) { use_discard(p); });
+    run_variant("use_read_one",  [](Vec2d p) { use_read_one(p); });
+    run_variant("use_read_both", [](Vec2d p) { use_read_both(p); });
+    run_variant("use_addr",      [](Vec2d p) { use_addr(p); });
+    run_variant("use_forward",   [](Vec2d p) { use_forward(p); });
+    run_variant("use_ref",       [](const Vec2d& p) { use_ref(p); });
 
-    const int failures = g_assert_count + g_value_failures;
-    std::printf("\ntotal asserts = %d  value-failures = %d  -- %s\n",
-                g_assert_count, g_value_failures,
-                failures == 0 ? "PASS" : "FAIL");
-    return failures == 0 ? 0 : 1;
+    std::printf("\nTOTAL EIGEN_ASSERT count = %d  -- %s\n",
+                g_assert_count, g_assert_count == 0 ? "PASS" : "FAIL");
+    return g_assert_count == 0 ? 0 : 1;
 }
