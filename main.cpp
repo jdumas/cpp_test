@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// Minimal reproducer for an MSVC ARM64 Debug codegen defect.
+// Minimal reproducer for an MSVC codegen defect.
 //
 // A brace-initialized prvalue of a type with extended alignment
 // (alignas(16) or stricter), materialized to pass a by-value function
 // argument, is placed at an address that does not satisfy the type's
-// alignment requirement.
-//
-// Per the C++ standard this is undefined behavior:
+// alignment requirement. Per the C++ standard this is undefined
+// behavior on the implementation's part:
 //
 //   [class.temporary]/1 -- "A temporary object is an object created
 //     ... when needed by the implementation to pass or return an
@@ -17,9 +16,17 @@
 //     object in storage that does not meet the alignment requirements
 //     of the object's type is undefined behavior."
 //
-// Both the Eigen and non-Eigen probes below fail on MSVC 14.44.35207
-// (_MSC_VER=1944) targeting ARM64 in Debug; the by-const-ref controls
-// pass. The defect is therefore type-agnostic and not Eigen-specific.
+// Observed on MSVC 14.44.35207 (_MSC_VER=1944) with the by-value
+// probes failing under every Windows configuration tested:
+//
+//   * Eigen probe   : FAILs on win-arm64 Debug.
+//   * S16  probe    : FAILs on win-arm64 Debug, win-arm64 Release,
+//                     and win-x64 Release.
+//
+// The by-const-ref controls pass uniformly. The defect is therefore
+// type-agnostic, target-architecture-agnostic, and present at both
+// optimization levels; Eigen-specific code paths only happen to mask
+// the assert when the optimizer can elide its constructor.
 
 #include <cstdint>
 #include <cstdio>
