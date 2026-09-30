@@ -1,14 +1,22 @@
 # Embree Emscripten SSE2 compile failure
 
-This repository is a minimal reproducer for Embree 4.4.1 failing to compile
-with Emscripten SIMD enabled. It has one translation unit (`main.cpp`) that
-includes Embree's SSE2 header directly.
+This reproduces an Emscripten SIMD compilation regression at Embree commit
+[`3d9cb89b9`](https://github.com/RenderKit/embree/commit/3d9cb89b9ea099c630e6272d37767e7dd4e78e74),
+19 commits after the `v4.4.1` release. The released `v4.4.1` tag compiles this
+MWE successfully.
+
+The single translation unit, [`main.cpp`](main.cpp), includes Embree's internal
+SSE2 headers. No Embree library build, application linking, or runtime is needed.
 
 ## Reproduce
 
 Requirements: `git` and Emscripten 4.0.14 (`em++`).
 
 ```sh
+git clone --branch embree-emscripten-repro --single-branch \
+    https://github.com/jdumas/cpp_test.git
+cd cpp_test
+
 git clone https://github.com/RenderKit/embree.git embree
 git -C embree checkout 3d9cb89b9ea099c630e6272d37767e7dd4e78e74
 
@@ -18,53 +26,44 @@ em++ -std=c++17 -msse -msse2 -msimd128 \
     -c main.cpp -o mwe.o
 ```
 
-The unpatched compile fails with `no member named 'm128i' in
-'embree::vboolf_impl<4>'`. The workflow verifies this expected failure, applies
-[`fix.patch`](fix.patch), then verifies that the same translation unit compiles.
-
-Run the check in GitHub Actions by pushing to `embree-emscripten-repro` or using
-the workflow dispatch. The latest run is
-[here](https://github.com/jdumas/cpp_test/actions/runs/36739556892); the unpatched
-compile emitted 11 `m128i` errors and the patched compile passed.
-
-## Issue details
-
-**Environment**
-
-- Embree 4.4.1, commit `3d9cb89b9ea099c630e6272d37767e7dd4e78e74`
-- Emscripten 4.0.14
-- `em++ -std=c++17 -msse -msse2 -msimd128`
-
-**Description**
-
-In `common/simd/vboolf4_sse2.h`, the `#if !defined(__EMSCRIPTEN__)` guard
-excludes both implicit `__m128i`/`__m128d` conversion operators and the named
-`m128i()` / `m128d()` accessors. The implicit conversions can remain excluded,
-but Embree's SSE2 headers call the named accessors unconditionally. For example,
-the equality operator in `vboolf4_sse2.h` calls `a.m128i()`, while `vint4_sse2.h`
-and `vuint4_sse2.h` call `mask.m128i()` in masked loads.
-
-Compiling `main.cpp` fails with diagnostics such as:
+Compilation is expected to fail with 11 errors, including:
 
 ```text
 error: no member named 'm128i' in 'embree::vboolf_impl<4>'
 ```
 
-This is a compile-time header failure; no application link or runtime is needed.
-The GitHub Actions run above confirms both the unpatched failure and successful
-compilation after applying `fix.patch`.
+Apply [`fix.patch`](fix.patch) and repeat the same compile command:
 
-**Expected behavior**
+```sh
+(cd embree && git apply ../fix.patch)
+em++ -std=c++17 -msse -msse2 -msimd128 \
+    -DEMBREE_TARGET_SSE2 \
+    -I"$PWD/embree" \
+    -c main.cpp -o mwe.o
+```
 
-Embree's SSE2 headers compile with Emscripten SIMD enabled.
+Compilation now succeeds.
 
-**Observed behavior**
+## Cause and fix
 
-Compilation fails because `m128i()` is hidden by the Emscripten guard even
-though Embree's own SSE2 headers call it.
+In `common/simd/vboolf4_sse2.h`, the `#if !defined(__EMSCRIPTEN__)` guard
+excludes the named `m128i()` / `m128d()` accessors along with the implicit
+conversion operators. However, Embree's SSE2 headers call `m128i()`
+unconditionally: the boolean equality operator uses `a.m128i()`, and the
+integer SIMD headers use `mask.m128i()` in masked loads.
 
-**Suggested fix**
+The named accessors were introduced by the
+[Windows ARM64 support change](https://github.com/RenderKit/embree/commit/b282335867a2cdcff518fe14a159defd8a7bd458).
+A subsequent [SIMD wrapper fix](https://github.com/RenderKit/embree/commit/0bdf3c3a468bc9a8d0bd0ed9938849519ae12c2e)
+kept them inside the Emscripten exclusion guard on the non-MSVC path.
+The proposed patch moves the explicit accessors outside the guard while keeping
+the implicit conversion operators excluded for Emscripten.
 
-Keep the implicit conversion operators guarded by `!__EMSCRIPTEN__`, but declare
-the explicit `m128i()` / `m128d()` accessors outside that guard. `fix.patch`
-makes the MWE compile.
+## GitHub Actions
+
+The [workflow](.github/workflows/embree-emscripten.yml) runs on pushes to this
+branch. It succeeds only if the unpatched compile fails with the expected
+`m128i` diagnostic and the patched compile succeeds.
+
+[Verified run](https://github.com/jdumas/cpp_test/actions/runs/36740131414)
+using Ubuntu 24.04 and Emscripten 4.0.14.
