@@ -27,7 +27,7 @@ the workflow dispatch. The latest run is
 [here](https://github.com/jdumas/cpp_test/actions/runs/36739556892); the unpatched
 compile emitted 11 `m128i` errors and the patched compile passed.
 
-## Draft report for Embree (not posted)
+## Issue details
 
 **Title:** Emscripten SSE2 build omits the `m128i()` accessor used by Embree SIMD headers
 
