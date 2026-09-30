@@ -49,7 +49,7 @@ jobs:
 
       - name: Confirm proposed fix compiles
         run: |
-          git -C embree apply embree-emscripten-mwe/fix.patch
+          (cd embree && git apply ../embree-emscripten-mwe/fix.patch)
           em++ -std=c++17 -msse -msse2 -msimd128 \
             -DEMBREE_TARGET_SSE2 \
             -I"$PWD/embree" \
