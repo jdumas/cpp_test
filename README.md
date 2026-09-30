@@ -29,8 +29,6 @@ compile emitted 11 `m128i` errors and the patched compile passed.
 
 ## Issue details
 
-**Title:** Emscripten SSE2 build omits the `m128i()` accessor used by Embree SIMD headers
-
 **Environment**
 
 - Embree 4.4.1, commit `3d9cb89b9ea099c630e6272d37767e7dd4e78e74`
