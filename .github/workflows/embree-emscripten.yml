@@ -15,7 +15,6 @@ jobs:
       - uses: mymindstorm/setup-emsdk@v14
         with:
           version: 4.0.14
-          actions-cache-folder: emsdk-cache
 
       - name: Check out Embree 4.4.1
         run: |

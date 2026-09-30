@@ -33,6 +33,9 @@ workflow. The workflow checks out the exact Embree revision, verifies that the
 unpatched source fails with the expected diagnostic, then applies the attached
 `fix.patch` and verifies that the translation unit compiles.
 
+The reproduction passed in [GitHub Actions run 36738728650](https://github.com/jdumas/cpp_test/actions/runs/36738728650):
+the unpatched compile emitted 11 `m128i` errors and the patched compile passed.
+
 **Expected behavior**
 
 Embree's SSE2 headers compile with Emscripten SIMD enabled.
