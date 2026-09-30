@@ -1,17 +1,8 @@
 diff --git i/common/simd/vboolf4_sse2.h w/common/simd/vboolf4_sse2.h
-index 9b85adb70..e7de12bee 100644
+index 9b85adb70..8c16d730a 100644
 --- i/common/simd/vboolf4_sse2.h
 +++ w/common/simd/vboolf4_sse2.h
-@@ -49,19 +49,17 @@ namespace embree
-     __forceinline vboolf(__m128 input) : v(input) {}
- #if defined(_MSC_VER) && defined(_M_ARM64)
-     __forceinline operator const __m128&() const { return v.data; }
--    #if !defined(__EMSCRIPTEN__)
-     __forceinline const __m128i m128i() const { return _mm_castps_si128(v.data); }
-     __forceinline const __m128d m128d() const { return _mm_castps_pd(v.data); }
--    #endif
- #else
-     __forceinline operator const __m128&() const { return v; }
+@@ -58,10 +58,10 @@ namespace embree
      #if !defined(__EMSCRIPTEN__)
      __forceinline operator const __m128i() const { return _mm_castps_si128(v); }
      __forceinline operator const __m128d() const { return _mm_castps_pd(v); }
