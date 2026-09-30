@@ -28,7 +28,7 @@ jobs:
           em++ -std=c++17 -msse -msse2 -msimd128 \
             -DEMBREE_TARGET_SSE2 \
             -I"$PWD/embree" \
-            -c embree-emscripten-mwe/mwe.cpp \
+            -c main.cpp \
             -o mwe-unpatched.o 2>unpatched.log
           status=$?
           set -e
@@ -48,9 +48,9 @@ jobs:
 
       - name: Confirm proposed fix compiles
         run: |
-          (cd embree && git apply ../embree-emscripten-mwe/fix.patch)
+          (cd embree && git apply ../fix.patch)
           em++ -std=c++17 -msse -msse2 -msimd128 \
             -DEMBREE_TARGET_SSE2 \
             -I"$PWD/embree" \
-            -c embree-emscripten-mwe/mwe.cpp \
+            -c main.cpp \
             -o mwe-patched.o

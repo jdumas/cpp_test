@@ -17,7 +17,7 @@ but Embree's SSE2 headers call the named accessors unconditionally. For example,
 the equality operator in `vboolf4_sse2.h` calls `a.m128i()`, while `vint4_sse2.h`
 and `vuint4_sse2.h` call `mask.m128i()` in masked loads.
 
-Compiling the attached `mwe.cpp` with Emscripten fails with diagnostics such as:
+Compiling the root `main.cpp` with Emscripten fails with diagnostics such as:
 
 ```text
 error: no member named 'm128i' in 'embree::vboolf_impl<4>'
@@ -28,12 +28,13 @@ is needed.
 
 **Reproduction**
 
-See the adjacent `README.md` and the `Embree Emscripten repro` GitHub Actions
+Run the commands in `README.md` or the `Embree Emscripten repro` GitHub Actions
 workflow. The workflow checks out the exact Embree revision, verifies that the
-unpatched source fails with the expected diagnostic, then applies the attached
-`fix.patch` and verifies that the translation unit compiles.
+unpatched source fails with the expected diagnostic, then applies `fix.patch`
+and verifies that the translation unit compiles.
 
-The reproduction passed in [GitHub Actions run 36738728650](https://github.com/jdumas/cpp_test/actions/runs/36738728650):
+The reproduction passed in
+[GitHub Actions run 36738938946](https://github.com/jdumas/cpp_test/actions/runs/36738938946):
 the unpatched compile emitted 11 `m128i` errors and the patched compile passed.
 
 **Expected behavior**
@@ -48,5 +49,5 @@ though Embree's own SSE2 headers call it.
 **Suggested fix**
 
 Keep the implicit conversion operators guarded by `!__EMSCRIPTEN__`, but declare
-the explicit `m128i()` / `m128d()` accessors outside that guard. The attached
-patch makes the MWE compile.
+the explicit `m128i()` / `m128d()` accessors outside that guard. `fix.patch`
+makes the MWE compile.
