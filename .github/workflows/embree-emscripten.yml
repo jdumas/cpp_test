@@ -1,0 +1,57 @@
+name: Embree Emscripten repro
+
+on:
+  push:
+    branches:
+      - embree-emscripten-repro
+  workflow_dispatch:
+
+jobs:
+  reproduce:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.14
+          actions-cache-folder: emsdk-cache
+
+      - name: Check out Embree 4.4.1
+        run: |
+          git clone --filter=blob:none https://github.com/RenderKit/embree.git embree
+          git -C embree checkout 3d9cb89b9ea099c630e6272d37767e7dd4e78e74
+
+      - name: Confirm unpatched compilation fails
+        shell: bash
+        run: |
+          set +e
+          em++ -std=c++17 -msse -msse2 -msimd128 \
+            -DEMBREE_TARGET_SSE2 \
+            -I"$PWD/embree" \
+            -c embree-emscripten-mwe/mwe.cpp \
+            -o mwe-unpatched.o 2>unpatched.log
+          status=$?
+          set -e
+
+          if [[ $status -eq 0 ]]; then
+            echo "Expected the unpatched Embree headers to fail compilation."
+            exit 1
+          fi
+
+          if ! grep -F "no member named 'm128i'" unpatched.log; then
+            cat unpatched.log
+            echo "Compilation failed for an unexpected reason."
+            exit 1
+          fi
+
+          cat unpatched.log
+
+      - name: Confirm proposed fix compiles
+        run: |
+          git -C embree apply embree-emscripten-mwe/fix.patch
+          em++ -std=c++17 -msse -msse2 -msimd128 \
+            -DEMBREE_TARGET_SSE2 \
+            -I"$PWD/embree" \
+            -c embree-emscripten-mwe/mwe.cpp \
+            -o mwe-patched.o
