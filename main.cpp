@@ -1,117 +1,65 @@
 // SPDX-License-Identifier: MPL-2.0
-//
-// Minimal reproducer for an MSVC codegen defect.
-//
-// A brace-initialized prvalue of a type with extended alignment
-// (alignas(16) or stricter), materialized to pass a by-value function
-// argument, is placed at an address that does not satisfy the type's
-// alignment requirement. Per the C++ standard this is undefined
-// behavior on the implementation's part:
-//
-//   [class.temporary]/1 -- "A temporary object is an object created
-//     ... when needed by the implementation to pass or return an
-//     object of suitable type."
-//   [basic.align]/1     -- "Stricter alignment can be requested using
-//     the alignment-specifier ([dcl.align]). Attempting to create an
-//     object in storage that does not meet the alignment requirements
-//     of the object's type is undefined behavior."
-//
-// Observed on MSVC 14.44.35207 (_MSC_VER=1944) with the by-value
-// probes failing under every Windows configuration tested:
-//
-//   * Eigen probe   : FAILs on win-arm64 Debug.
-//   * S16  probe    : FAILs on win-arm64 Debug, win-arm64 Release,
-//                     and win-x64 Release.
-//
-// The by-const-ref controls pass uniformly. The defect is therefore
-// type-agnostic, target-architecture-agnostic, and present at both
-// optimization levels; Eigen-specific code paths only happen to mask
-// the assert when the optimizer can elide its constructor.
+#include <embree4/rtcore.h>
 
-#include <cstdint>
+#include <cmath>
 #include <cstdio>
-#include <vector>
+#include <cstring>
+#include <limits>
 
-static int g_misalign_count = 0;
-#define eigen_assert(x) do { if (!(x)) ++g_misalign_count; } while (0)
-
-#include <Eigen/Core>
-
-#if defined(_MSC_VER)
-#define NOINLINE __declspec(noinline)
-#else
-#define NOINLINE __attribute__((noinline))
-#endif
-
-using Vec2d = Eigen::Matrix<double, 1, 2>;
-
-// Non-Eigen counterpart: a plain struct with the same storage shape
-// (two doubles) and the same extended alignment as Vec2d, so the
-// same braced-init-list initializes either type via the lambda
-// parameter below.
-struct alignas(16) S16 {
-    double a, b;
-    S16(double x, double y) : a(x), b(y) {
-        eigen_assert((reinterpret_cast<std::uintptr_t>(this) & 0xFu) == 0);
-    }
-};
-
-// Opaque sinks the lambda probes forward to. Marking them NOINLINE
-// prevents the lambda bodies (and the run() instantiations) from
-// collapsing to a no-op, which is what masked the codegen defect in
-// earlier iterations of this MWE.
-NOINLINE void sink_vec_by_value(Vec2d        p) { (void)p; }
-NOINLINE void sink_vec_by_ref  (const Vec2d& p) { (void)p; }
-NOINLINE void sink_s16_by_value(S16          p) { (void)p; }
-NOINLINE void sink_s16_by_ref  (const S16&   p) { (void)p; }
-
-// Templated driver: the prvalue temporary is materialized in this
-// frame from a braced-init-list at the fn() call site, then used to
-// initialize fn's parameter object. Two std::vector locals make the
-// frame layout non-trivial so the temporary's stack slot lands at a
-// representative offset rather than a happenstance 16-aligned one.
-template <class F>
-NOINLINE void run(const char* label, F&& fn)
-{
-    const int before = g_misalign_count;
-    std::vector<double> pad_a(8, 0.0);
-    std::vector<int>    pad_b(8, 0);
-    for (int i = 0; i < 8; ++i) {
-        const double t = double(i) / 8.0;
-        fn({1.0 - t, 0.0});
-    }
-    const int delta = g_misalign_count - before;
-    std::printf("  %-40s misalignments=%d  %s\n",
-                label, delta, delta == 0 ? "PASS" : "FAIL");
-    std::fflush(stdout);
+static bool point_query(RTCPointQueryFunctionArguments *args) {
+    ++*static_cast<unsigned *>(args->userPtr);
+    return false;
 }
 
-int main()
-{
-    std::printf("== prvalue temporary alignment probe ==\n");
-#if defined(_MSC_VER)
-    std::printf("  _MSC_VER = %d\n", _MSC_VER);
-#endif
-#if defined(_M_ARM64) || defined(__aarch64__)
-    std::printf("  arch     = arm64\n");
-#elif defined(_M_X64) || defined(__x86_64__)
-    std::printf("  arch     = x86_64\n");
-#endif
-    std::printf("  Eigen    = %d.%d.%d\n",
-                EIGEN_WORLD_VERSION, EIGEN_MAJOR_VERSION, EIGEN_MINOR_VERSION);
-    std::printf("  alignof(Eigen::Matrix<double,1,2>) = %zu\n", alignof(Vec2d));
-    std::printf("  alignof(S16)                       = %zu\n\n", alignof(S16));
+int main() {
+    RTCDevice device = rtcNewDevice("isa=sse2,threads=1");
+    if (!device) {
+        std::fprintf(stderr, "rtcNewDevice failed\n");
+        return 2;
+    }
+    RTCScene scene = rtcNewScene(device);
+    RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+    auto *vertices = static_cast<float *>(rtcSetNewGeometryBuffer(
+        geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof(float), 3));
+    const float data[] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+    std::memcpy(vertices, data, sizeof(data));
+    auto *indices = static_cast<unsigned *>(rtcSetNewGeometryBuffer(
+        geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(unsigned), 1));
+    indices[0] = 0;
+    indices[1] = 1;
+    indices[2] = 2;
+    rtcCommitGeometry(geom);
+    const unsigned geometry_id = rtcAttachGeometry(scene, geom);
+    rtcReleaseGeometry(geom);
+    rtcCommitScene(scene);
 
-    run("Eigen::Matrix<double,1,2>  by value",
-        [](Vec2d        p) { sink_vec_by_value(p); });
-    run("Eigen::Matrix<double,1,2>  by const&",
-        [](const Vec2d& p) { sink_vec_by_ref  (p); });
-    run("alignas(16) struct S16     by value",
-        [](S16          p) { sink_s16_by_value(p); });
-    run("alignas(16) struct S16     by const&",
-        [](const S16&   p) { sink_s16_by_ref  (p); });
+    RTCRayHit rayhit{};
+    rayhit.ray.org_x = rayhit.ray.org_y = .2f;
+    rayhit.ray.org_z = -1.f;
+    rayhit.ray.dir_z = 1.f;
+    rayhit.ray.tfar = std::numeric_limits<float>::infinity();
+    rayhit.ray.mask = ~0u;
+    rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+    for (auto &id : rayhit.hit.instID)
+        id = RTC_INVALID_GEOMETRY_ID;
+    RTCIntersectArguments args;
+    rtcInitIntersectArguments(&args);
+    rtcIntersect1(scene, &rayhit, &args);
+    std::printf("intersect geomID=%u distance=%f\n", rayhit.hit.geomID, rayhit.ray.tfar);
 
-    std::printf("\nTOTAL misalignments = %d  -- %s\n",
-                g_misalign_count, g_misalign_count == 0 ? "PASS" : "FAIL");
-    return g_misalign_count == 0 ? 0 : 1;
+    RTCPointQuery query{};
+    query.x = query.y = .2f;
+    query.radius = 1.f;
+    RTCPointQueryContext context;
+    rtcInitPointQueryContext(&context);
+    unsigned count = 0;
+    rtcPointQuery(scene, &query, &context, point_query, &count);
+    std::printf("point query callbacks=%u\n", count);
+    RTCError error = rtcGetDeviceError(device);
+    rtcReleaseScene(scene);
+    rtcReleaseDevice(device);
+    return error == RTC_ERROR_NONE && count == 1 && rayhit.hit.geomID == geometry_id &&
+                   std::abs(rayhit.ray.tfar - 1.f) < 1e-6f
+               ? 0
+               : 1;
 }

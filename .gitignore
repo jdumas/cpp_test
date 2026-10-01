@@ -1,1 +1,3 @@
 build/
+embree/
+*.log
