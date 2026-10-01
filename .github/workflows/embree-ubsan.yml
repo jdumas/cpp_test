@@ -43,7 +43,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --target probe
+          cmake --build build --target probe -j 2
 
       - name: Run with UBSan
         run: |
