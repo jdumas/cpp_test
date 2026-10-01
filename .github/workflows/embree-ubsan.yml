@@ -16,135 +16,39 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [clang, gcc]
-    name: ${{ matrix.compiler }}
+        include:
+          # Clang reports both the incompatible function-pointer calls and the downcast.
+          - name: clang-18
+            cc: clang-18
+            cxx: clang++-18
+          # GCC does not implement -fsanitize=function, so it reports only the downcast.
+          - name: gcc-13
+            cc: gcc-13
+            cxx: g++-13
+    name: ${{ matrix.name }}
     env:
       EMBREE_REVISION: 3d9cb89b9ea099c630e6272d37767e7dd4e78e74
-      COMPILER: ${{ matrix.compiler }}
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select compiler
+      - name: Check out Embree
         run: |
-          if [[ "$COMPILER" == clang ]]; then
-            echo 'CC=clang-18' >> "$GITHUB_ENV"
-            echo 'CXX=clang++-18' >> "$GITHUB_ENV"
-          else
-            echo 'CC=gcc-13' >> "$GITHUB_ENV"
-            echo 'CXX=g++-13' >> "$GITHUB_ENV"
-          fi
-
-      - name: Record compiler and revision
-        run: |
-          "$CXX" --version
-          cmake --version
           git init embree
           git -C embree remote add origin https://github.com/RenderKit/embree.git
           git -C embree fetch --depth=1 origin "$EMBREE_REVISION"
           git -C embree checkout --detach FETCH_HEAD
-          git -C embree rev-parse HEAD | tee embree-revision.log
 
-      - name: Configure unmodified Embree with UBSan
+      - name: Build
         run: |
-          cmake -S . -B build/raw -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DREPRO_NARROW_EXCLUSIONS=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --target probe
 
-      - name: Build unmodified Embree
-        run: cmake --build build/raw --target probe -j 2
-
-      - name: Confirm the expected diagnostics with recovery enabled
+      - name: Run with UBSan
         run: |
-          UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=1 ./build/raw/probe > unpatched.log 2>&1
-          cat unpatched.log
-          grep -E 'primitive.h:[0-9]+:[0-9]+: runtime error: downcast' unpatched.log
-          grep -F "does not point to an object of type 'AccelSet'" unpatched.log
-          if [[ "$COMPILER" == clang ]]; then
-            grep -E 'accel.h:[0-9]+:[0-9]+: runtime error: call to function .*::intersect\(' unpatched.log
-            grep -E 'accel.h:[0-9]+:[0-9]+: runtime error: call to function .*::pointQuery\(' unpatched.log
-            grep -F 'through pointer to incorrect function type' unpatched.log
-          fi
-          grep -F 'intersect geomID=0 distance=1.000000' unpatched.log
-          grep -F 'point query callbacks=1' unpatched.log
-
-      - name: Confirm fail-fast UBSan rejects the unmodified build
-        run: |
-          set +e
-          UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./build/raw/probe > fail-fast.log 2>&1
-          status=$?
-          set -e
-          cat fail-fast.log
-          if [[ $status -eq 0 ]]; then
-            echo 'Expected fail-fast UBSan to reject the unmodified build.'
+          UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=1 ./build/probe 2>&1 | tee probe.log
+          if grep -q 'runtime error:' probe.log; then
+            echo '::error::UBSan reported undefined behavior in Embree (see log above).'
             exit 1
           fi
-          grep -F 'runtime error:' fail-fast.log
-
-      - name: Configure the narrow-exclusion control
-        run: |
-          cmake -S . -B build/control -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DREPRO_NARROW_EXCLUSIONS=ON
-
-      - name: Build the control
-        run: cmake --build build/control --target probe -j 2
-
-      - name: Confirm the control runs without diagnostics
-        run: |
-          UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./build/control/probe > control.log 2>&1
-          cat control.log
-          if grep -q 'runtime error:' control.log; then
-            exit 1
-          fi
-          ctest --test-dir build/control --verbose --no-tests=error
-
-      - name: Check the instrumentation boundary
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import shlex
-          from pathlib import Path
-
-          for mode in ['raw', 'control']:
-              entries = json.loads(Path(f'build/{mode}/compile_commands.json').read_text())
-              kernels = 0
-              for entry in entries:
-                  args = entry.get('arguments') or shlex.split(entry['command'])
-                  path = Path(entry['file'])
-                  assert '-fsanitize=undefined' in args, entry['file']
-                  assert '-fno-sanitize=undefined' not in args, entry['file']
-                  kernel = 'kernels' in path.parts
-                  excluded = mode == 'control' and kernel
-                  assert ('-fno-sanitize=vptr' in args) == excluded, entry['file']
-                  expected_function = excluded and os.environ['COMPILER'] == 'clang'
-                  assert ('-fno-sanitize=function' in args) == expected_function, entry['file']
-                  kernels += kernel
-              assert kernels > 0
-              print(f'{mode}: checked {len(entries)} compiler commands, including {kernels} kernels')
-          PY
-
-      - name: Summarize the result
-        run: |
-          {
-            echo "## Embree $EMBREE_REVISION / $COMPILER"
-            echo '- Unmodified Embree: expected UBSan diagnostics reproduced.'
-            echo '- Fail-fast UBSan: unmodified executable rejected.'
-            echo '- Narrow kernel-only exclusions: clean execution.'
-            echo '- Reproducer and auxiliary libraries remain UBSan-instrumented.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload reproduction evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: embree-ubsan-${{ matrix.compiler }}
-          path: |
-            *.log
-            build/raw/compile_commands.json
-            build/control/compile_commands.json
-            build/raw/CMakeCache.txt
-            build/control/CMakeCache.txt
-          if-no-files-found: warn

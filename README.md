@@ -49,7 +49,7 @@ To build with GCC, use `CC=gcc-13 CXX=g++-13` instead.
 
 ## Observed output (Clang 18)
 
-Template arguments are abbreviated; the full log is in the CI artifacts.
+Template arguments are abbreviated; the full log is in the `clang-18` CI job.
 
 ```text
 embree/kernels/common/accel.h:270:9: runtime error: call to function embree::sse2::BVHNIntersector1<4, 1, false, ...>::intersect(embree::Accel::Intersectors const*, embree::RayHitK<1>&, embree::RayQueryContext*) through pointer to incorrect function type 'void (*)(embree::Accel::Intersectors *, RTCRayHit &, embree::RayQueryContext *)'
@@ -92,14 +92,7 @@ ctest --test-dir build/control --verbose --no-tests=error
 
 ## Continuous integration
 
-[The workflow](.github/workflows/embree-ubsan.yml) runs the reproducer with Clang 18 and
-GCC 13 on Ubuntu 24.04. It checks that:
-
-1. The unmodified build reports the downcast and, with Clang, both incompatible
-   function-pointer calls.
-2. The queries still return the expected results when UBSan recovery is enabled.
-3. The unmodified build fails when `halt_on_error=1` is set.
-4. The workaround build runs without diagnostics.
-5. The compile commands match the intended instrumentation scope.
-
-Each job uploads the logs, compile commands, and CMake cache as artifacts.
+[The workflow](.github/workflows/embree-ubsan.yml) builds and runs the reproducer on
+Ubuntu 24.04 and fails if UBSan reports any error. The `clang-18` job shows all three
+diagnostics. The `gcc-13` job shows only the downcast because GCC does not implement
+`-fsanitize=function`.
