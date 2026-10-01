@@ -2,7 +2,9 @@
 
 This branch uses the entire repository as a minimal native Embree reproducer.
 It creates one triangle, intersects one ray, and performs one point query.
-There is no Lagrange, Eigen, TBB, ISPC, or GPU dependency.
+There is no Lagrange, Eigen, TBB, ISPC, or GPU dependency. Unused ray-packet
+kernels are disabled. The build explicitly uses `-O0 -g1`, overriding Embree's
+`-O3` Debug defaults without removing assertions or sanitizer checks.
 
 ## Findings
 

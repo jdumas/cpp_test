@@ -15,13 +15,15 @@ if(NOT EXISTS "${EMBREE_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "Check out RenderKit/embree into ${EMBREE_SOURCE_DIR} first")
 endif()
 
-add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer)
+# Embree's Debug flags enable -O3; override them for a faster, unoptimized MWE build.
+add_compile_options(-fsanitize=undefined -fno-omit-frame-pointer -O0 -g1)
 add_link_options(-fsanitize=undefined)
 
 set(EMBREE_IGNORE_CMAKE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
 set(EMBREE_STATIC_LIB ON CACHE BOOL "" FORCE)
 set(EMBREE_MAX_ISA SSE2 CACHE STRING "" FORCE)
 set(EMBREE_TASKING_SYSTEM INTERNAL CACHE STRING "" FORCE)
+set(EMBREE_RAY_PACKETS OFF CACHE BOOL "" FORCE)
 set(EMBREE_ISPC_SUPPORT OFF CACHE BOOL "" FORCE)
 set(EMBREE_SYCL_SUPPORT OFF CACHE BOOL "" FORCE)
 set(EMBREE_TUTORIALS OFF CACHE BOOL "" FORCE)
